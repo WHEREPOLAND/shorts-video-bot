@@ -37,7 +37,9 @@ Telegram-бот для групповых чатов: присылаете сс�
 - `Dockerfile` уже содержит ffmpeg и зависимости.
 - `render.yaml` описывает сервис: план `free`, регион `frankfurt`, health check `/ping`.
 - В дашборде Render нужно задать секреты `TELEGRAM_TOKEN` (и при желании `ADMIN_IDS`).
-- Бесплатный инстанс засыпает без трафика — добавьте UptimeRobot на `https://<service>.onrender.com/ping`
+- Бесплатный инстанс засыпает без трафика — бот сам пингует свой `/ping` каждые 10 минут
+  (Render передаёт `RENDER_EXTERNAL_URL` автоматически), поэтому в обычной работе не спит.
+  Для надёжности можно дополнительно добавить UptimeRobot на `https://<service>.onrender.com/ping`
   каждые 5–10 минут.
 
 Либо через Render Blueprint: **New → Blueprint** → выберите репозиторий.
@@ -57,6 +59,8 @@ Telegram-бот для групповых чатов: присылаете сс�
 | `MAX_LINKS_PER_MESSAGE` | `3` | Ссылок из одного сообщения |
 | `FFMPEG_PRESET` | `veryfast` | На Render free лучше `ultrafast` |
 | `PROXY_URL` | — | Прокси для yt-dlp (если платформа блокирует IP сервера) |
+| `KEEPALIVE_URL` | `RENDER_EXTERNAL_URL` | Адрес self-ping; на Render задаётся сам |
+| `KEEPALIVE_INTERVAL_SEC` | `600` | Интервал self-ping |
 | `COOKIES_FILE` | — | Путь к cookies.txt (Netscape) |
 | `COOKIES_B64` | — | Cookies.txt в base64 — удобно для Render |
 | `ALLOWED_HOSTS` | youtube/youtu.be/instagram/tiktok | Какие домены реагировать |
