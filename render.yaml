@@ -1,0 +1,35 @@
+schema: 1
+
+# Render Blueprint для нового бота. Старый aliexpress-tech-bot не затрагивается.
+services:
+  - type: web
+    name: shorts-video-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /ping
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: MAX_UPLOAD_MB
+        value: "49"
+      - key: MAX_DURATION_SEC
+        value: "600"
+      - key: MAX_CONCURRENT_JOBS
+        value: "1"
+      - key: MAX_QUEUE
+        value: "10"
+      - key: FFMPEG_PRESET
+        value: ultrafast
+      - key: WORK_DIR
+        value: /tmp/shorts-video-bot
+      - key: LOG_LEVEL
+        value: INFO
+      # Необязательно: cookies для Instagram/YouTube и прокси.
+      # - key: COOKIES_B64
+      #   sync: false
+      # - key: PROXY_URL
+      #   sync: false
