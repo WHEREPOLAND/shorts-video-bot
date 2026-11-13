@@ -29,6 +29,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = _env_str(name).lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _env_set(name: str) -> frozenset[int]:
     raw = _env_str(name)
     if not raw:
@@ -60,9 +67,11 @@ class Config:
     max_upload_mb: int = 48
     max_download_mb: int = 512
     max_duration_sec: int = 600
+    max_height: int = 1080
     max_concurrent_jobs: int = 1
     max_queue: int = 10
     max_links_per_message: int = 3
+    make_thumbnail: bool = True
     proxy: str | None = None
     cookies_file: str | None = None
     keepalive_url: str | None = None
@@ -92,9 +101,11 @@ class Config:
             max_upload_mb=_env_int("MAX_UPLOAD_MB", 48),
             max_download_mb=_env_int("MAX_DOWNLOAD_MB", 512),
             max_duration_sec=_env_int("MAX_DURATION_SEC", 600),
+            max_height=_env_int("MAX_HEIGHT", 1080),
             max_concurrent_jobs=max(1, _env_int("MAX_CONCURRENT_JOBS", 1)),
             max_queue=max(1, _env_int("MAX_QUEUE", 10)),
             max_links_per_message=max(1, _env_int("MAX_LINKS_PER_MESSAGE", 3)),
+            make_thumbnail=_env_bool("MAKE_THUMBNAIL", True),
             proxy=_env_str("PROXY_URL") or None,
             cookies_file=_env_str("COOKIES_FILE") or None,
             keepalive_url=_env_str("KEEPALIVE_URL") or _env_str("RENDER_EXTERNAL_URL") or None,
