@@ -16,6 +16,10 @@ services:
         sync: false
       - key: MAX_UPLOAD_MB
         value: "48"
+      - key: MAX_HEIGHT
+        value: "1080"
+      - key: MAKE_THUMBNAIL
+        value: "1"
       - key: MAX_DURATION_SEC
         value: "600"
       - key: MAX_CONCURRENT_JOBS
