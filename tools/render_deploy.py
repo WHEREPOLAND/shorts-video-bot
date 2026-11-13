@@ -31,7 +31,7 @@ PLAN = os.getenv("RENDER_PLAN", "free")
 ENV_VARS = [
     {"key": "TELEGRAM_TOKEN", "value": os.getenv("TELEGRAM_TOKEN", "")},
     {"key": "ADMIN_IDS", "value": os.getenv("ADMIN_IDS", "")},
-    {"key": "MAX_UPLOAD_MB", "value": "49"},
+    {"key": "MAX_UPLOAD_MB", "value": "48"},
     {"key": "MAX_DOWNLOAD_MB", "value": "512"},
     {"key": "MAX_DURATION_SEC", "value": "600"},
     {"key": "MAX_CONCURRENT_JOBS", "value": "1"},
