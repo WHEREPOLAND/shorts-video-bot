@@ -8,6 +8,7 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 
 from .config import Config
+from .urls import host_of
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,22 @@ FORMAT_SPEC = (
     "/bv*+ba"
 )
 
+# Если YouTube включает проверку «я не бот», пробуем другие клиенты плеера.
+# web_embedded обычно отдаёт полное качество, android_vr — 360p, но часто проходит.
+YOUTUBE_CLIENTS: tuple[str | None, ...] = (None, "web_embedded", "android_vr", "tv_embedded")
+
+_RETRY_MARKERS = (
+    "sign in to confirm",
+    "not a bot",
+    "page needs to be reloaded",
+    "failed to extract",
+    "unable to extract",
+    "no video formats",
+    "requested format is not available",
+    "unable to download",
+    "http error 403",
+)
+
 
 class DownloadFailed(Exception):
     """Ошибка скачивания с сообщением для пользователя."""
@@ -45,6 +62,16 @@ class _SilentLogger:
 
     def error(self, msg: str) -> None:  # noqa: D102
         log.warning("yt-dlp: %s", msg)
+
+
+def _is_youtube(url: str) -> bool:
+    host = host_of(url)
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def _is_retryable(raw: str) -> bool:
+    text = raw.lower()
+    return any(marker in text for marker in _RETRY_MARKERS)
 
 
 def _pick_file(work_dir: Path, info: dict) -> Path | None:
@@ -84,6 +111,8 @@ def _friendly_error(raw: str) -> str:
         return "Видео не найдено — проверьте ссылку."
     if "max-filesize" in text or "larger than max" in text:
         return "Видео больше допустимого размера."
+    if "слишком длинное" in text:
+        return "Видео слишком длинное для обработки."
     if "timed out" in text or "timeout" in text:
         return "Сервис не ответил вовремя. Попробуйте ещё раз."
     if "geo" in text and "restrict" in text:
@@ -92,10 +121,7 @@ def _friendly_error(raw: str) -> str:
     return f"Не удалось скачать видео: {cleaned[:180]}" if cleaned else "Не удалось скачать видео."
 
 
-def download_media(url: str, work_dir: Path, cfg: Config) -> tuple[Path, dict]:
-    """Скачивает лучшее доступное видео. Блокирующая функция — вызывать в отдельном потоке."""
-    work_dir.mkdir(parents=True, exist_ok=True)
-
+def _build_options(cfg: Config, target_dir: Path, extra: dict | None = None) -> dict:
     def match_filter(info: dict, *, incomplete: bool = False) -> str | None:
         duration = info.get("duration")
         if duration and duration > cfg.max_duration_sec:
@@ -106,7 +132,7 @@ def download_media(url: str, work_dir: Path, cfg: Config) -> tuple[Path, dict]:
     options: dict = {
         "format": FORMAT_SPEC,
         "merge_output_format": "mp4",
-        "paths": {"home": str(work_dir), "temp": str(work_dir)},
+        "paths": {"home": str(target_dir), "temp": str(target_dir)},
         "outtmpl": "%(id)s.%(ext)s",
         "noplaylist": True,
         "quiet": True,
@@ -123,46 +149,86 @@ def download_media(url: str, work_dir: Path, cfg: Config) -> tuple[Path, dict]:
         "max_filesize": cfg.max_download_bytes,
         "match_filter": match_filter,
         "http_headers": {"Accept-Language": "en-US,en;q=0.9"},
-        "postprocessors": [],
     }
     if cfg.cookies_path:
         options["cookiefile"] = cfg.cookies_path
     if cfg.proxy:
         options["proxy"] = cfg.proxy
+    if extra:
+        options.update(extra)
+    return options
 
-    log.info("download: %s", url)
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=True)
-        if not info:
-            raise DownloadFailed("Не удалось получить информацию о видео.")
-        if info.get("_type") == "playlist":
-            entries = [entry for entry in info.get("entries") or [] if entry]
-            if not entries:
-                raise DownloadFailed("В ссылке не нашлось видео.")
-            info = entries[0]
-        path = _pick_file(work_dir, info)
-        if not path or path.stat().st_size == 0:
-            raise DownloadFailed("Видео скачалось пустым. Попробуйте другую ссылку.")
-        meta = {
-            "title": (info.get("title") or "").strip(),
-            "uploader": (info.get("uploader") or info.get("channel") or "").strip(),
-            "webpage_url": info.get("webpage_url") or url,
-            "extractor": (info.get("extractor_key") or "").strip(),
-            "format_id": (info.get("format_id") or "").strip(),
-        }
-        log.info(
-            "downloaded %s (%s bytes, format=%s)",
-            path.name,
-            path.stat().st_size,
-            meta["format_id"] or "?",
-        )
-        return path, meta
-    except DownloadFailed:
-        raise
-    except DownloadError as exc:
-        log.warning("yt-dlp error for %s: %s", url, exc)
-        raise DownloadFailed(_friendly_error(str(exc))) from exc
-    except Exception as exc:  # noqa: BLE001
-        log.exception("unexpected download error for %s", url)
-        raise DownloadFailed("Неожиданная ошибка при скачивании. Попробуйте ещё раз.") from exc
+
+def _download_once(url: str, target_dir: Path, cfg: Config, client: str | None) -> tuple[Path, dict]:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    extra = None
+    if client:
+        extra = {"extractor_args": {"youtube": {"player_client": [client]}}}
+    options = _build_options(cfg, target_dir, extra)
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+    if not info:
+        raise DownloadFailed("Не удалось получить информацию о видео.")
+    if info.get("_type") == "playlist":
+        entries = [entry for entry in info.get("entries") or [] if entry]
+        if not entries:
+            raise DownloadFailed("В ссылке не нашлось видео.")
+        info = entries[0]
+    path = _pick_file(target_dir, info)
+    if not path or path.stat().st_size == 0:
+        raise DownloadFailed("Видео скачалось пустым. Попробуйте другую ссылку.")
+    meta = {
+        "title": (info.get("title") or "").strip(),
+        "uploader": (info.get("uploader") or info.get("channel") or "").strip(),
+        "webpage_url": info.get("webpage_url") or url,
+        "extractor": (info.get("extractor_key") or "").strip(),
+        "format_id": (info.get("format_id") or "").strip(),
+    }
+    return path, meta
+
+
+def download_media(url: str, work_dir: Path, cfg: Config) -> tuple[Path, dict]:
+    """Скачивает лучшее доступное видео. Блокирующая функция — вызывать в отдельном потоке."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    clients = YOUTUBE_CLIENTS if _is_youtube(url) else (None,)
+    first_error = ""
+    last_error = ""
+    result: tuple[Path, dict] | None = None
+    used_client: str | None = None
+
+    for index, client in enumerate(clients):
+        target = work_dir / f"try{index + 1}"
+        log.info("download: %s (client=%s)", url, client or "default")
+        try:
+            result = _download_once(url, target, cfg, client)
+            used_client = client
+            break
+        except DownloadError as exc:
+            last_error = str(exc)
+            if not first_error:
+                first_error = last_error
+            log.warning("yt-dlp error for %s [%s]: %s", url, client or "default", last_error[:300])
+            if client is None and len(clients) == 1:
+                break
+            if not _is_retryable(last_error):
+                break
+        except DownloadFailed as exc:
+            log.warning("download failed for %s: %s", url, exc)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("unexpected download error for %s", url)
+            raise DownloadFailed("Неожиданная ошибка при скачивании. Попробуйте ещё раз.") from exc
+
+    if result is None:
+        raise DownloadFailed(_friendly_error(first_error or last_error))
+
+    path, meta = result
+    log.info(
+        "downloaded %s (%s bytes, format=%s, client=%s)",
+        path.name,
+        path.stat().st_size,
+        meta["format_id"] or "?",
+        used_client or "default",
+    )
+    return path, meta
