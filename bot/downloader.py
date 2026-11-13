@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from pathlib import Path
 
 import yt_dlp
@@ -128,7 +129,13 @@ def _friendly_error(raw: str) -> str:
     return f"Не удалось скачать видео: {cleaned[:180]}" if cleaned else "Не удалось скачать видео."
 
 
-def _build_options(cfg: Config, target_dir: Path, extra: dict | None = None) -> dict:
+def _build_options(
+    cfg: Config,
+    target_dir: Path,
+    extra: dict | None = None,
+    *,
+    use_aria2: bool = False,
+) -> dict:
     def match_filter(info: dict, *, incomplete: bool = False) -> str | None:
         duration = info.get("duration")
         if duration and duration > cfg.max_duration_sec:
@@ -162,17 +169,39 @@ def _build_options(cfg: Config, target_dir: Path, extra: dict | None = None) -> 
         options["cookiefile"] = cfg.cookies_path
     if cfg.proxy:
         options["proxy"] = cfg.proxy
+    if use_aria2:
+        # aria2 качает файл в несколько соединений — заметно быстрее на медленных CDN.
+        options["external_downloader"] = {"default": "aria2c"}
+        options["external_downloader_args"] = {
+            "default": [
+                "-x",
+                "8",
+                "-s",
+                "8",
+                "-k",
+                "1M",
+                "--summary-interval=0",
+                "--console-log-level=error",
+            ]
+        }
     if extra:
         options.update(extra)
     return options
 
 
-def _download_once(url: str, target_dir: Path, cfg: Config, client: str | None) -> tuple[Path, dict]:
+def _download_once(
+    url: str,
+    target_dir: Path,
+    cfg: Config,
+    client: str | None,
+    *,
+    use_aria2: bool = False,
+) -> tuple[Path, dict]:
     target_dir.mkdir(parents=True, exist_ok=True)
     extra = None
     if client:
         extra = {"extractor_args": {"youtube": {"player_client": [client]}}}
-    options = _build_options(cfg, target_dir, extra)
+    options = _build_options(cfg, target_dir, extra, use_aria2=use_aria2)
 
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -233,24 +262,36 @@ def download_media(url: str, work_dir: Path, cfg: Config) -> tuple[Path, dict]:
     """Скачивает лучшее доступное видео. Блокирующая функция — вызывать в отдельном потоке."""
     work_dir.mkdir(parents=True, exist_ok=True)
     clients = YOUTUBE_CLIENTS if _is_youtube(url) else (None,)
+    use_aria2 = cfg.aria2 and not _is_youtube(url) and shutil.which("aria2c") is not None
+
+    # (клиент плеера, aria2) — сначала быстро, потом обычным способом.
+    plan: list[tuple[str | None, bool]] = [(client, use_aria2) for client in clients]
+    if use_aria2:
+        plan.append((None, False))
+
     first_error = ""
     last_error = ""
     result: tuple[Path, dict] | None = None
     used_client: str | None = None
+    used_aria2 = False
 
-    for index, client in enumerate(clients):
+    for index, (client, aria2) in enumerate(plan):
         target = work_dir / f"try{index + 1}"
-        log.info("download: %s (client=%s)", url, client or "default")
+        log.info("download: %s (client=%s, aria2=%s)", url, client or "default", aria2)
         try:
-            result = _download_once(url, target, cfg, client)
+            result = _download_once(url, target, cfg, client, use_aria2=aria2)
             used_client = client
+            used_aria2 = aria2
             break
         except DownloadError as exc:
             last_error = str(exc)
             if not first_error:
                 first_error = last_error
             log.warning("yt-dlp error for %s [%s]: %s", url, client or "default", last_error[:300])
-            if client is None and len(clients) == 1:
+            if aria2:
+                # Многопоточная загрузка не подошла — пробуем обычную.
+                continue
+            if client is None and len(plan) == 1:
                 break
             if not _is_retryable(last_error):
                 break
@@ -266,10 +307,11 @@ def download_media(url: str, work_dir: Path, cfg: Config) -> tuple[Path, dict]:
 
     path, meta = result
     log.info(
-        "downloaded %s (%s bytes, format=%s, client=%s)",
+        "downloaded %s (%.1f MB, format=%s, client=%s, aria2=%s)",
         path.name,
-        path.stat().st_size,
+        path.stat().st_size / 1048576,
         meta["format_id"] or "?",
         used_client or "default",
+        used_aria2,
     )
     return path, meta
