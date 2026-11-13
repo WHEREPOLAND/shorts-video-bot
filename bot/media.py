@@ -15,9 +15,8 @@ FFPROBE = os.getenv("FFPROBE_BINARY", "ffprobe")
 FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "veryfast")
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT_SEC", "900"))
 
-VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".flv", ".ts"}
 READY_VIDEO_CODECS = {"h264"}
-READY_AUDIO_CODECS = {"aac", "mp3", "opus"}
+READY_AUDIO_CODECS = {"aac", "mp3"}
 
 
 class MediaError(Exception):
@@ -30,6 +29,7 @@ class MediaInfo:
     duration: float
     width: int
     height: int
+    fps: float
     video_codec: str | None
     audio_codec: str | None
     size: int
@@ -67,6 +67,18 @@ def _run(cmd: list[str], timeout: int = FFMPEG_TIMEOUT) -> subprocess.CompletedP
         log.error("ffmpeg failed: %s | %s", " ".join(cmd), " / ".join(tail))
         raise MediaError("Не удалось обработать видео (ошибка ffmpeg).")
     return proc
+
+
+def _parse_rate(raw: str | None) -> float:
+    if not raw:
+        return 0.0
+    try:
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            return float(num) / float(den) if float(den) else 0.0
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def probe(path: Path) -> MediaInfo:
@@ -123,6 +135,7 @@ def probe(path: Path) -> MediaInfo:
         duration=duration,
         width=width,
         height=height,
+        fps=_parse_rate(video.get("avg_frame_rate")) or _parse_rate(video.get("r_frame_rate")),
         video_codec=(video.get("codec_name") or "").lower() or None,
         audio_codec=(audio.get("codec_name") or "").lower() if audio else None,
         size=path.stat().st_size if path.is_file() else 0,
@@ -193,90 +206,81 @@ def make_thumbnail(src: Path, work_dir: Path, duration: float) -> Path | None:
         return None
 
 
-def _encode(src: Path, dst: Path, height: int, crf: int, preset: str) -> None:
-    scale = f"scale=-2:min(ih\\,{height})"
-    _run(
-        [
-            FFMPEG,
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-i",
-            str(src),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-vf",
-            scale,
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset,
-            "-crf",
-            str(crf),
-            "-profile:v",
-            "high",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-ac",
-            "2",
-            "-movflags",
-            "+faststart",
-            str(dst),
-        ]
-    )
+def _transcode(
+    src: Path,
+    dst: Path,
+    height: int,
+    preset: str,
+    fps: float,
+    *,
+    crf: int | None = None,
+    video_kbps: int | None = None,
+) -> None:
+    if crf is None and video_kbps is None:
+        raise ValueError("нужен crf или video_kbps")
 
+    cmd = [
+        FFMPEG,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        str(src),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        f"scale=-2:min(ih\\,{height})",
+    ]
+    # 60 fps укорачивает вдвое только время кодирования, но не качество картинки.
+    if fps > 31:
+        cmd += ["-r", "30"]
 
-def _encode_with_bitrate(src: Path, dst: Path, height: int, video_kbps: int, preset: str) -> None:
-    scale = f"scale=-2:min(ih\\,{height})"
-    _run(
-        [
-            FFMPEG,
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-i",
-            str(src),
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0?",
-            "-vf",
-            scale,
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset,
+    cmd += ["-c:v", "libx264", "-preset", preset, "-profile:v", "high", "-pix_fmt", "yuv420p"]
+    if video_kbps is not None:
+        cmd += [
             "-b:v",
             f"{video_kbps}k",
             "-maxrate",
             f"{video_kbps}k",
             "-bufsize",
             f"{video_kbps * 2}k",
-            "-profile:v",
-            "high",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "96k",
-            "-ac",
-            "2",
-            "-movflags",
-            "+faststart",
-            str(dst),
         ]
-    )
+        audio_kbps = 96
+    else:
+        cmd += ["-crf", str(crf)]
+        audio_kbps = 128
+
+    cmd += [
+        "-c:a",
+        "aac",
+        "-b:a",
+        f"{audio_kbps}k",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(dst),
+    ]
+    _run(cmd)
+
+
+def _target_height(info: MediaInfo, total_kbps: int | None) -> int:
+    source = info.height or 720
+    if total_kbps is None:
+        cap = 1280
+    elif total_kbps < 700:
+        cap = 480
+    elif total_kbps < 1600:
+        cap = 720
+    elif total_kbps < 3200:
+        cap = 1280
+    else:
+        cap = 1920
+    return max(360, min(source, cap))
 
 
 def fit_for_telegram(src: Path, work_dir: Path, max_bytes: int) -> FittedVideo:
@@ -289,45 +293,55 @@ def fit_for_telegram(src: Path, work_dir: Path, max_bytes: int) -> FittedVideo:
     info = probe(src)
     out = work_dir / "telegram.mp4"
 
-    # 1. Файл уже в нужном формате — просто переставляем moov atom для стриминга.
+    # 1. Файл уже H.264/AAC — просто переставляем moov atom для стриминга.
     if _telegram_ready(info) and info.size <= max_bytes:
-        remux(src, out)
-        if out.is_file() and 0 < out.stat().st_size <= max_bytes:
-            final = probe(out)
-            log.info("remux ok: %s -> %s bytes", src.name, final.size)
-            return FittedVideo(out, final)
+        try:
+            remux(src, out)
+            if out.is_file() and 0 < out.stat().st_size <= max_bytes:
+                final = probe(out)
+                log.info("remux ok: %s -> %s bytes", src.name, final.size)
+                return FittedVideo(out, final)
+        except MediaError:
+            log.warning("remux failed for %s, falling back to transcode", src.name)
 
-    # 2. Перекодируем: сначала лучшее качество, затем ниже, пока не влезем в лимит.
-    preset = FFMPEG_PRESET
-    ladder: list[tuple[int, int]] = [(1080, 27), (720, 26), (480, 28), (360, 30)]
-    if info.duration > 0:
-        needed_kbps = int(max_bytes * 8 / info.duration / 1000)
-        if needed_kbps < 1200:
-            ladder = [step for step in ladder if step[0] <= 720]
+    # 2. Один проход с целевым битрейтом: сразу попадаем в лимит, без «лестницы».
+    duration = info.duration or 0
+    total_kbps = None
+    if duration > 0:
+        total_kbps = int(max_bytes * 8 / duration / 1000 * 0.92)
 
-    for height, crf in ladder:
-        if info.height and height > info.height + 8 and height > 720:
-            continue
-        log.info("transcode %s -> %sp crf=%s preset=%s", src.name, height, crf, preset)
-        _encode(src, out, height, crf, preset)
+    height = _target_height(info, total_kbps)
+    attempts: list[tuple[int, int | None]] = []
+    if total_kbps:
+        attempts.append((height, max(280, total_kbps - 96)))
+        attempts.append((max(360, (height * 3 // 4) // 2 * 2), max(240, int((total_kbps - 96) * 0.75))))
+    else:
+        attempts.append((height, None))
+        attempts.append((max(360, height // 2), None))
+
+    for target_height, kbps in attempts:
+        log.info(
+            "transcode %s -> %sp %s preset=%s",
+            src.name,
+            target_height,
+            f"{kbps}kbps" if kbps else "crf=27",
+            FFMPEG_PRESET,
+        )
+        _transcode(
+            src,
+            out,
+            target_height,
+            FFMPEG_PRESET,
+            info.fps,
+            crf=None if kbps else 27,
+            video_kbps=kbps,
+        )
         if not out.is_file():
             continue
         size = out.stat().st_size
         log.info("transcode result: %s bytes (limit %s)", size, max_bytes)
         if 0 < size <= max_bytes:
             return FittedVideo(out, probe(out))
-
-    # 3. Последний шанс: считаем битрейт под лимит вручную.
-    duration = info.duration or 0
-    if duration > 0:
-        audio_kbps = 96
-        total_kbps = int((max_bytes * 8 / duration / 1000) * 0.92)
-        video_kbps = max(220, total_kbps - audio_kbps)
-        for height in (480, 360):
-            log.info("bitrate transcode -> %sp %s kbps", height, video_kbps)
-            _encode_with_bitrate(src, out, height, video_kbps, preset)
-            if out.is_file() and 0 < out.stat().st_size <= max_bytes:
-                return FittedVideo(out, probe(out))
 
     raise MediaError(
         "Видео слишком большое для отправки в Telegram даже после сжатия. "
