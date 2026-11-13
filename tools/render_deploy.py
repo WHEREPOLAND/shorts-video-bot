@@ -138,7 +138,7 @@ def update_service(key: str, service: dict) -> None:
             print(f"warning: plan update failed ({status}): {data}")
 
     status, data = api(key, "POST", f"/services/{service_id}/deploys", {})
-    if status not in (200, 201):
+    if status not in (200, 201, 202):
         raise SystemExit(f"Render: деплой не запустился ({status}): {data}")
     deploy = data if isinstance(data, dict) else {}
     print(f"deploy triggered: {deploy.get('id', '')} status={deploy.get('status', '')}")
