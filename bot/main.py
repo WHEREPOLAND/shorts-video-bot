@@ -13,6 +13,7 @@ from .config import Config
 from .context import AppContext
 from .handlers import router
 from .health import start_health_server
+from .keepalive import keepalive_loop
 from .media import ensure_tools
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,13 @@ async def run() -> None:
     dp.include_router(router)
 
     runner = await start_health_server(cfg.port, app_ctx)
+    keepalive_task: asyncio.Task | None = None
+    if cfg.keepalive_url:
+        keepalive_task = asyncio.create_task(
+            keepalive_loop(cfg.keepalive_url, cfg.keepalive_interval)
+        )
+    else:
+        log.info("keepalive disabled (KEEPALIVE_URL/RENDER_EXTERNAL_URL not set)")
     try:
         me = await bot.get_me()
         log.info("authorized as @%s (id=%s)", me.username, me.id)
@@ -61,6 +69,14 @@ async def run() -> None:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                log.debug("keepalive task stopped with error", exc_info=True)
         await runner.cleanup()
         await bot.session.close()
 
