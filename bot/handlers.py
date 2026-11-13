@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from aiogram import Bot, F, Router
@@ -16,7 +17,7 @@ from . import __version__
 from .context import AppContext
 from .downloader import DownloadFailed, download_media
 from .formatting import build_caption, format_duration
-from .media import MediaError, fit_for_telegram, make_thumbnail
+from .media import MediaError, MediaInfo, fit_for_telegram, make_thumbnail
 from .urls import URL_RE, extract_links
 
 log = logging.getLogger(__name__)
@@ -158,25 +159,38 @@ async def _process_link(bot: Bot, app: AppContext, message: Message, url: str) -
     app.pending = max(0, app.pending - 1)
     job_dir = Path(tempfile.mkdtemp(prefix="job-", dir=str(cfg.work_dir)))
     status: Message | None = None
+    started = time.perf_counter()
     try:
         try:
-            status = await message.reply("⏳ В очереди…")
+            status = await message.reply("⬇️ Скачиваю видео…")
         except TelegramBadRequest:
             status = None
 
         async with app.semaphore:
             app.active += 1
             try:
-                await _safe_edit(status, "⬇️ Скачиваю видео…")
                 path, meta = await asyncio.to_thread(download_media, url, job_dir, cfg)
+                downloaded_at = time.perf_counter()
 
-                await _safe_edit(status, "🎞 Готовлю видео для Telegram…")
+                hint = MediaInfo(
+                    path=path,
+                    duration=float(meta.get("duration") or 0),
+                    width=int(meta.get("width") or 0),
+                    height=int(meta.get("height") or 0),
+                    fps=float(meta.get("fps") or 0),
+                    video_codec=meta.get("vcodec") or None,
+                    audio_codec=meta.get("acodec") or None,
+                    size=path.stat().st_size,
+                )
                 fitted = await asyncio.to_thread(
-                    fit_for_telegram, path, job_dir, cfg.max_upload_bytes
+                    fit_for_telegram, path, job_dir, cfg.max_upload_bytes, hint
                 )
-                thumb = await asyncio.to_thread(
-                    make_thumbnail, fitted.path, job_dir, fitted.info.duration
-                )
+                thumb = None
+                if cfg.make_thumbnail:
+                    thumb = await asyncio.to_thread(
+                        make_thumbnail, fitted.path, job_dir, fitted.info.duration
+                    )
+                prepared_at = time.perf_counter()
 
                 caption = build_caption(
                     title=meta.get("title") or "Видео",
@@ -187,6 +201,7 @@ async def _process_link(bot: Bot, app: AppContext, message: Message, url: str) -
                 )
                 await _safe_edit(status, "📤 Отправляю…")
                 await _send_video(message, fitted, thumb, caption)
+                sent_at = time.perf_counter()
 
                 app.done += 1
                 if status is not None:
@@ -194,7 +209,15 @@ async def _process_link(bot: Bot, app: AppContext, message: Message, url: str) -
                         await status.delete()
                     except TelegramBadRequest:
                         pass
-                log.info("sent video for %s (%s bytes)", url, fitted.info.size)
+                log.info(
+                    "sent video for %s in %.1fs (download %.1fs, prepare %.1fs, upload %.1fs, %.1f MB)",
+                    url,
+                    sent_at - started,
+                    downloaded_at - started,
+                    prepared_at - downloaded_at,
+                    sent_at - prepared_at,
+                    fitted.info.size / 1048576,
+                )
             finally:
                 app.active -= 1
 
