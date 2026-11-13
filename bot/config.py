@@ -72,6 +72,7 @@ class Config:
     max_queue: int = 10
     max_links_per_message: int = 3
     make_thumbnail: bool = True
+    aria2: bool = True
     proxy: str | None = None
     cookies_file: str | None = None
     keepalive_url: str | None = None
@@ -106,6 +107,7 @@ class Config:
             max_queue=max(1, _env_int("MAX_QUEUE", 10)),
             max_links_per_message=max(1, _env_int("MAX_LINKS_PER_MESSAGE", 3)),
             make_thumbnail=_env_bool("MAKE_THUMBNAIL", True),
+            aria2=_env_bool("ARIA2", True),
             proxy=_env_str("PROXY_URL") or None,
             cookies_file=_env_str("COOKIES_FILE") or None,
             keepalive_url=_env_str("KEEPALIVE_URL") or _env_str("RENDER_EXTERNAL_URL") or None,
