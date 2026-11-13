@@ -57,7 +57,7 @@ class Config:
     allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
     port: int = 8080
     work_dir: Path = Path("/tmp/shorts-video-bot")
-    max_upload_mb: int = 49
+    max_upload_mb: int = 48
     max_download_mb: int = 512
     max_duration_sec: int = 600
     max_concurrent_jobs: int = 1
@@ -87,7 +87,7 @@ class Config:
             allowed_hosts=_env_hosts("ALLOWED_HOSTS", DEFAULT_ALLOWED_HOSTS),
             port=_env_int("PORT", 8080),
             work_dir=work_dir,
-            max_upload_mb=_env_int("MAX_UPLOAD_MB", 49),
+            max_upload_mb=_env_int("MAX_UPLOAD_MB", 48),
             max_download_mb=_env_int("MAX_DOWNLOAD_MB", 512),
             max_duration_sec=_env_int("MAX_DURATION_SEC", 600),
             max_concurrent_jobs=max(1, _env_int("MAX_CONCURRENT_JOBS", 1)),
