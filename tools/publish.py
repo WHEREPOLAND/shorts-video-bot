@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,23 +43,29 @@ def load_env(path: Path) -> dict[str, str]:
 
 def api(token: str, method: str, path: str, payload: dict | None = None) -> tuple[int, object]:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(f"{API}{path}", data=body, method=method)
-    request.add_header("Authorization", f"Bearer {token}")
-    request.add_header("Accept", "application/vnd.github+json")
-    request.add_header("X-GitHub-Api-Version", "2022-11-28")
-    request.add_header("User-Agent", "shorts-video-bot-publisher")
-    if body is not None:
-        request.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            raw = response.read().decode("utf-8")
-            return response.status, json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace")
+    last_error: Exception | None = None
+    for attempt in range(4):
+        request = urllib.request.Request(f"{API}{path}", data=body, method=method)
+        request.add_header("Authorization", f"Bearer {token}")
+        request.add_header("Accept", "application/vnd.github+json")
+        request.add_header("X-GitHub-Api-Version", "2022-11-28")
+        request.add_header("User-Agent", "shorts-video-bot-publisher")
+        if body is not None:
+            request.add_header("Content-Type", "application/json")
         try:
-            return exc.code, json.loads(raw)
-        except json.JSONDecodeError:
-            return exc.code, raw
+            with urllib.request.urlopen(request, timeout=90) as response:
+                raw = response.read().decode("utf-8")
+                return response.status, json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            try:
+                return exc.code, json.loads(raw)
+            except json.JSONDecodeError:
+                return exc.code, raw
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last_error = exc
+            time.sleep(2 + attempt * 2)
+    raise SystemExit(f"GitHub: сеть недоступна после нескольких попыток: {last_error}")
 
 
 def collect_files() -> list[Path]:
@@ -100,16 +108,26 @@ def ensure_repo(token: str, owner: str, repo: str) -> None:
     print(f"repo created: {data.get('full_name')}")
 
 
+def blob_sha(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("utf-8")
+    return hashlib.sha1(header + data).hexdigest()
+
+
 def put_file(token: str, owner: str, repo: str, path: Path, message: str) -> bool:
     relative = path.relative_to(ROOT).as_posix()
     encoded_path = urllib.parse.quote(relative, safe="/")
+    content = path.read_bytes()
     payload: dict = {
         "message": f"{message}: {relative}",
-        "content": base64.b64encode(path.read_bytes()).decode("ascii"),
+        "content": base64.b64encode(content).decode("ascii"),
     }
     status, existing = api(token, "GET", f"/repos/{owner}/{repo}/contents/{encoded_path}")
-    if status == 200 and isinstance(existing, dict) and existing.get("sha"):
-        payload["sha"] = existing["sha"]
+    if status == 200 and isinstance(existing, dict):
+        if existing.get("sha") == blob_sha(content):
+            print(f"  = {relative}")
+            return True
+        if existing.get("sha"):
+            payload["sha"] = existing["sha"]
 
     status, data = api(token, "PUT", f"/repos/{owner}/{repo}/contents/{encoded_path}", payload)
     if status in (200, 201):
