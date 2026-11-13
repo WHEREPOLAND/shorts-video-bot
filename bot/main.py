@@ -5,6 +5,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
@@ -42,8 +43,11 @@ async def run() -> None:
     log.info("starting shorts-video-bot %s", __version__)
 
     app_ctx = AppContext(cfg=cfg, semaphore=asyncio.Semaphore(cfg.max_concurrent_jobs))
+    # Большой таймаут: загрузка видео в Telegram на медленном канале может идти минутами.
+    session = AiohttpSession(timeout=600)
     bot = Bot(
         token=cfg.token,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
     )
     dp = Dispatcher()
