@@ -65,6 +65,8 @@ class Config:
     max_links_per_message: int = 3
     proxy: str | None = None
     cookies_file: str | None = None
+    keepalive_url: str | None = None
+    keepalive_interval: int = 600
     log_level: str = "INFO"
 
     @property
@@ -95,6 +97,8 @@ class Config:
             max_links_per_message=max(1, _env_int("MAX_LINKS_PER_MESSAGE", 3)),
             proxy=_env_str("PROXY_URL") or None,
             cookies_file=_env_str("COOKIES_FILE") or None,
+            keepalive_url=_env_str("KEEPALIVE_URL") or _env_str("RENDER_EXTERNAL_URL") or None,
+            keepalive_interval=_env_int("KEEPALIVE_INTERVAL_SEC", 600),
             log_level=_env_str("LOG_LEVEL", "INFO").upper(),
         )
         work_dir.mkdir(parents=True, exist_ok=True)
