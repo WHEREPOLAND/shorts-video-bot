@@ -18,16 +18,23 @@ VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
 # Порядок важен:
 #   1. лучшее H.264-видео (avc1 у YouTube, h264 у TikTok) + AAC-аудио;
 #   2. готовый MP4 с видео и звуком (Instagram отдаёт такие без кодека в метаданных);
-#   3. лучшее комбинированное;
+#   3. лучшее комбинированное (меньше склейки — быстрее отправка);
 #   4. любые дорожки (потом перекодируем в H.264);
 #   5. что угодно.
-FORMAT_SPEC = (
-    "bv*[height<=1920][vcodec~='^(avc1|h264)']+ba[acodec~='^(mp4a|aac)']"
-    "/b[height<=1920][vcodec~='^(avc1|h264)']"
-    "/b"
-    "/bv*[height<=1920]+ba"
-    "/bv*+ba"
-)
+def format_spec(max_height: int = 1080) -> str:
+    height = max(360, int(max_height))
+    return (
+        f"bv*[height<={height}][vcodec~='^(avc1|h264)']+ba[acodec~='^(mp4a|aac)']"
+        f"/b[height<={height}][vcodec~='^(avc1|h264)']"
+        f"/b[height<={height}]"
+        # Instagram отдаёт progressive-форматы без высоты и кодека в метаданных.
+        "/b"
+        f"/bv*[height<={height}]+ba"
+        f"/bv*+ba"
+    )
+
+
+FORMAT_SPEC = format_spec(1080)
 
 # Если YouTube включает проверку «я не бот», пробуем другие клиенты плеера.
 # web_embedded обычно отдаёт полное качество, android_vr — 360p, но часто проходит.
@@ -130,7 +137,7 @@ def _build_options(cfg: Config, target_dir: Path, extra: dict | None = None) -> 
         return None
 
     options: dict = {
-        "format": FORMAT_SPEC,
+        "format": format_spec(cfg.max_height),
         "merge_output_format": "mp4",
         "paths": {"home": str(target_dir), "temp": str(target_dir)},
         "outtmpl": "%(id)s.%(ext)s",
@@ -145,7 +152,8 @@ def _build_options(cfg: Config, target_dir: Path, extra: dict | None = None) -> 
         "retries": 3,
         "fragment_retries": 3,
         "socket_timeout": 25,
-        "concurrent_fragment_downloads": 4,
+        # Параллельные фрагменты ускоряют HLS/DASH-источники (YouTube, часть CDN).
+        "concurrent_fragment_downloads": 8,
         "max_filesize": cfg.max_download_bytes,
         "match_filter": match_filter,
         "http_headers": {"Accept-Language": "en-US,en;q=0.9"},
@@ -178,12 +186,45 @@ def _download_once(url: str, target_dir: Path, cfg: Config, client: str | None) 
     path = _pick_file(target_dir, info)
     if not path or path.stat().st_size == 0:
         raise DownloadFailed("Видео скачалось пустым. Попробуйте другую ссылку.")
+    downloads = info.get("requested_downloads") or []
+    actual = downloads[0] if downloads else {}
+
+    def first(*keys: str) -> object:
+        for key in keys:
+            for source in (actual, info):
+                value = source.get(key) if isinstance(source, dict) else None
+                if value not in (None, "", 0, 0.0):
+                    return value
+        return None
+
+    def as_float(value: object) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
+
+    def as_int(value: object) -> int:
+        try:
+            return int(float(value))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    def as_codec(value: object) -> str:
+        text = str(value or "").strip().lower()
+        return "" if text in {"none", "unknown", ""} else text
+
     meta = {
         "title": (info.get("title") or "").strip(),
         "uploader": (info.get("uploader") or info.get("channel") or "").strip(),
         "webpage_url": info.get("webpage_url") or url,
         "extractor": (info.get("extractor_key") or "").strip(),
         "format_id": (info.get("format_id") or "").strip(),
+        "duration": as_float(first("duration")),
+        "width": as_int(first("width")),
+        "height": as_int(first("height")),
+        "fps": as_float(first("fps")),
+        "vcodec": as_codec(first("vcodec")),
+        "acodec": as_codec(first("acodec")),
     }
     return path, meta
 
