@@ -15,7 +15,7 @@ services:
       - key: ADMIN_IDS
         sync: false
       - key: MAX_UPLOAD_MB
-        value: "49"
+        value: "48"
       - key: MAX_DURATION_SEC
         value: "600"
       - key: MAX_CONCURRENT_JOBS
