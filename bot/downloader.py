@@ -13,12 +13,19 @@ log = logging.getLogger(__name__)
 
 VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
 
-# Предпочитаем H.264/AAC и mp4: такие файлы Telegram не пережимает.
+# Предпочитаем H.264/AAC: такие файлы Telegram не пережимает и играет на любом устройстве.
+# Порядок важен:
+#   1. лучшее H.264-видео (avc1 у YouTube, h264 у TikTok) + AAC-аудио;
+#   2. готовый MP4 с видео и звуком (Instagram отдаёт такие без кодека в метаданных);
+#   3. лучшее комбинированное;
+#   4. любые дорожки (потом перекодируем в H.264);
+#   5. что угодно.
 FORMAT_SPEC = (
-    "bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]"
-    "/bv*[height<=1080]+ba"
-    "/b[height<=1080]"
-    "/bv*+ba/b"
+    "bv*[height<=1920][vcodec~='^(avc1|h264)']+ba[acodec~='^(mp4a|aac)']"
+    "/b[height<=1920][vcodec~='^(avc1|h264)']"
+    "/b"
+    "/bv*[height<=1920]+ba"
+    "/bv*+ba"
 )
 
 
@@ -142,8 +149,14 @@ def download_media(url: str, work_dir: Path, cfg: Config) -> tuple[Path, dict]:
             "uploader": (info.get("uploader") or info.get("channel") or "").strip(),
             "webpage_url": info.get("webpage_url") or url,
             "extractor": (info.get("extractor_key") or "").strip(),
+            "format_id": (info.get("format_id") or "").strip(),
         }
-        log.info("downloaded %s (%s bytes)", path.name, path.stat().st_size)
+        log.info(
+            "downloaded %s (%s bytes, format=%s)",
+            path.name,
+            path.stat().st_size,
+            meta["format_id"] or "?",
+        )
         return path, meta
     except DownloadFailed:
         raise
